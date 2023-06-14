@@ -5,6 +5,11 @@ import torchvision.transforms as transforms
 from torchvision import models
 import torch.optim as optim
 
+import glob
+import os
+import os.path
+import shutil
+
 import os
 from PIL import Image
 import argparse
@@ -81,24 +86,35 @@ def model_selection(selection):
 
 
 
-def train(net1, labeled_loader, optimizer, criterion, scheduler):
-
+# def train(net1, labeled_loader, optimizer, criterion, scheduler):
+#
+#     net1.train()
+#     #Supervised_training
+#     for batch_idx, (inputs, targets) in enumerate(labeled_loader):
+#         if torch.cuda.is_available():
+#             inputs, targets = inputs.cuda(), targets.cuda()
+#         optimizer.zero_grad()
+#         ####################
+#         #Write your Code
+#         #Model should be optimized based on given "targets"
+#         ####################
+#         outputs = net1(inputs)
+#         loss = criterion(outputs, targets)
+#         loss.backward()
+#         optimizer.step()
+#     scheduler.step()
+#     # print("have been scheduler.step()")
+        
+def train(net1, labeled_loader, optimizer, criterion):
     net1.train()
-    #Supervised_training
     for batch_idx, (inputs, targets) in enumerate(labeled_loader):
         if torch.cuda.is_available():
             inputs, targets = inputs.cuda(), targets.cuda()
         optimizer.zero_grad()
-        ####################
-        #Write your Code
-        #Model should be optimized based on given "targets"
-        ####################
         outputs = net1(inputs)
         loss = criterion(outputs, targets)
         loss.backward()
         optimizer.step()
-    # scheduler.step()
-        
 
 
         
@@ -116,6 +132,22 @@ def test(net, testloader):
             correct += predicted.eq(targets).sum().item()
         return 100. * correct / total
 
+def test_fortrain(net, testloader, criterion):
+    net.eval()
+    test_loss = 0
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for batch_idx, (inputs, targets) in enumerate(testloader):
+            if torch.cuda.is_available():
+                inputs, targets = inputs.cuda(), targets.cuda()
+            outputs = net(inputs)
+            loss = criterion(outputs, targets)
+            test_loss += loss.item()
+            _, predicted = outputs.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
+        return 100. * correct / total, test_loss / len(testloader)
 
 
 
@@ -160,56 +192,70 @@ if __name__ == "__main__":
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
-        
+    """반복 실행을 위해서 추가한 부분"""
+    model_list = ['mobilenet']
+    step_size = [2, 3, 5]
+    factor = [0.125, 0.1,0.075]
 
-    model_name = 'vgg'
-                 #Input model name to use in the model_section class
-                 #e.g., 'resnet', 'vgg', 'mobilenet', 'custom'
+
+
+    model_name = 'mobilenet'
+    # Input model name to use in the model_section class
+    # e.g., 'resnet', 'vgg', 'mobilenet', 'custom'
 
     if torch.cuda.is_available():
         model = model_selection(model_name).cuda()
-    else :
+    else:
         model = model_selection(model_name)
 
     params = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
 
-    #You may want to write a loader code that loads the model state to continue the learning process
-    #Since this learning process may take a while.
-    
-    
+    # You may want to write a loader code that loads the model state to continue the learning process
+    # Since this learning process may take a while.
+
     if torch.cuda.is_available():
         criterion = nn.CrossEntropyLoss().cuda()
-    else :
+    else:
         criterion = nn.CrossEntropyLoss()
 
-    epoch = 100  # Number of Epochs
-    optimizer = optim.Adam(model.parameters(), lr=0.01)  # Optimizer with learning rate
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.1)  # LR Scheduler
-    #You may want to add a scheduler for your loss
-    
+    epoch = 40  # Number of Epochs
+    optimizer = optim.Adam(model.parameters(), lr=0.001)  # Optimizer with learning rate
+    # scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=4, gamma=0.85)  # LR Scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.1)
+
+    # You may want to add a scheduler for your loss
+
     best_result = 0
     if args.test == 'False':
-        assert params < 7.0, "Exceed the limit on the number of model parameters" 
+        assert params < 7.0, "Exceed the limit on the number of model parameters"
         for e in range(0, epoch):
-            train(model, labeled_loader, optimizer, criterion, scheduler)
-            tmp_res = test(model, val_loader)
+            # train(model, labeled_loader, optimizer, criterion, scheduler)
+            train_loss = train(model, labeled_loader, optimizer, criterion)
+            tmp_res, val_loss = test_fortrain(model, val_loader, criterion)  # Assume this function returns validation loss
             # You can change the saving strategy, but you can't change the file name/path
             # If there's any difference to the file name/path, it will not be evaluated.
-            print('{}th performance, res : {}'.format(e, tmp_res))
+            print('{}th performance, Accuracy : {}, Learning_rate = {}'.format(e + 1, tmp_res,
+                                                                               optimizer.param_groups[0][
+                                                                                   'lr']))
+            scheduler.step(val_loss)  # Here we pass validation loss to the scheduler
+
             if best_result < tmp_res:
                 best_result = tmp_res
-                torch.save(model.state_dict(),  os.path.join('./logs', 'Supervised_Learning', 'best_model.pt'))
+                torch.save(model.state_dict(),
+                           os.path.join('./logs', 'Supervised_Learning', 'best_model.pt'))
         print('Final performance {} - {}'.format(best_result, params))
-            
-            
-        
-    else:
-        #This part is used to evaluate. 
-        #Do not edit this part!
-        dataset = CustomDataset(root = '/data/23_1_ML_challenge/Supervised_Learning/test', transform = test_transform)
-        test_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
-        model.load_state_dict(torch.load(os.path.join(args.student_abs_path, 'logs', 'Supervised_Learning', 'best_model.pt'), map_location=torch.device('cuda')))
+
+    else:
+        # This part is used to evaluate.
+        # Do not edit this part!
+        dataset = CustomDataset(root='/data/23_1_ML_challenge/Supervised_Learning/test',
+                                transform=test_transform)
+        test_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=2,
+                                 pin_memory=True)
+
+        model.load_state_dict(
+            torch.load(os.path.join(args.student_abs_path, 'logs', 'Supervised_Learning', 'best_model.pt'),
+                       map_location=torch.device('cuda')))
         res = test(model, test_loader)
-        print(res, ' - ' , params)
-    
+        print(res, ' - ', params)
